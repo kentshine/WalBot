@@ -348,15 +348,6 @@ const STEALTH_ARGS = [
   '--disable-setuid-sandbox',
   '--disable-dev-shm-usage',
   '--disable-gpu',
-  '--disable-blink-features=AutomationControlled',
-  '--disable-features=IsolateOrigins,site-per-process',
-  '--disable-infobars',
-  '--disable-background-timer-throttling',
-  '--disable-backgrounding-occluded-windows',
-  '--disable-renderer-backgrounding',
-  '--window-size=1280,900',
-  '--start-maximized',
-  '--lang=en-US,en',
 ];
 
 const USER_AGENT =
@@ -386,25 +377,6 @@ async function launchStealthBrowser() {
     },
   });
 
-  // Mask webdriver property
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    // Override plugins to look like a real browser
-    Object.defineProperty(navigator, 'plugins', {
-      get: () => [1, 2, 3, 4, 5],
-    });
-    // Override languages
-    Object.defineProperty(navigator, 'languages', {
-      get: () => ['en-US', 'en'],
-    });
-    // Override platform
-    Object.defineProperty(navigator, 'platform', {
-      get: () => 'Win32',
-    });
-    // Remove chrome automation indicators
-    window.chrome = { runtime: {} };
-  });
-
   log('   Stealth Chromium ready!', 'SUCCESS');
   return { browser, context };
 }
@@ -421,29 +393,6 @@ async function checkStock() {
     const launched = await launchStealthBrowser();
     browser = launched.browser;
     const context = launched.context;
-
-    // Block heavy assets (images, fonts, media) and tracking scripts to optimize speed and prevent network hangs
-    await context.route('**/*', (route) => {
-      const resourceType = route.request().resourceType();
-      if (['image', 'media', 'font'].includes(resourceType)) {
-        return route.abort();
-      }
-      const url = route.request().url().toLowerCase();
-      if (
-        url.includes('google-analytics') ||
-        url.includes('doubleclick') ||
-        url.includes('facebook') ||
-        url.includes('segment') ||
-        url.includes('hotjar') ||
-        url.includes('dynatrace') ||
-        url.includes('sentry') ||
-        url.includes('sc-static') ||
-        url.includes('adsystem')
-      ) {
-        return route.abort();
-      }
-      return route.continue();
-    });
 
     // Set store location cookies
     log('   Setting store location cookies...', 'INFO');
