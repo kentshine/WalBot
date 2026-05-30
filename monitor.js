@@ -346,6 +346,8 @@ function sleep(ms) {
 const STEALTH_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-gpu',
   '--disable-blink-features=AutomationControlled',
   '--disable-features=IsolateOrigins,site-per-process',
   '--disable-infobars',
