@@ -4,11 +4,11 @@
 // Monitors a specific Walmart product for in-store availability
 // at the Horseheads Supercenter and sends Discord alerts.
 //
-// Uses rebrowser-playwright (undetected Chromium) in headless
-// mode for cloud deployment (Railway, Render, etc.)
+// Uses official Playwright Chromium in headless
+// mode with stealth arguments for cloud deployment
 // ============================================
 
-const { chromium } = require('rebrowser-playwright');
+const { chromium } = require('playwright');
 const https = require('https');
 const http = require('http');
 const fs = require('fs');
