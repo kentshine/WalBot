@@ -1,0 +1,4 @@
+node_modules/
+.env
+.stock-state.json
+.chrome-profile/

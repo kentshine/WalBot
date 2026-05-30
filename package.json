@@ -1,0 +1,21 @@
+{
+  "name": "walmart-bot",
+  "version": "2.0.0",
+  "description": "Walmart stock alert monitor for in-store product availability (cloud-ready with stealth Chromium)",
+  "main": "monitor.js",
+  "scripts": {
+    "start": "node monitor.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright": "^1.60.0",
+    "rebrowser-playwright": "^1.51.0"
+  }
+}
