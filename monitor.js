@@ -13,6 +13,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const tls = require('tls');
 
 // ── Configuration ──────────────────────────────────────────────
 const CONFIG = {
@@ -31,6 +32,7 @@ const CONFIG = {
   reminderIntervalMinutes: 60,
   discordWebhookUrl: '',
   port: 10000,
+  proxyUrl: '',
 };
 
 // ── State Tracking ─────────────────────────────────────────────
@@ -96,6 +98,7 @@ function loadEnv() {
   }
 
   CONFIG.discordWebhookUrl = process.env.DISCORD_WEBHOOK_URL || '';
+  CONFIG.proxyUrl = process.env.PROXY_URL || '';
   const interval = parseInt(process.env.CHECK_INTERVAL_MINUTES, 10);
   if (!isNaN(interval) && interval > 0) {
     CONFIG.checkIntervalMinutes = interval;
@@ -390,6 +393,7 @@ const USER_AGENT =
 function fetchPage(url, extraCookies = []) {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
+    const proxyUrl = CONFIG.proxyUrl || '';
 
     // Merge extraCookies into the global cookie jar
     if (extraCookies && extraCookies.length > 0) {
@@ -402,32 +406,160 @@ function fetchPage(url, extraCookies = []) {
       .map(([name, value]) => `${name}=${value}`)
       .join('; ');
 
-    const options = {
-      hostname: parsedUrl.hostname,
-      port: 443,
-      path: parsedUrl.pathname + parsedUrl.search,
-      method: 'GET',
-      headers: {
-        'Host': parsedUrl.hostname,
-        'Connection': 'keep-alive',
-        'User-Agent': USER_AGENT,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Cache-Control': 'max-age=0',
-        'Cookie': cookieHeader,
-        'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'sec-fetch-dest': 'document',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-site': 'none',
-        'sec-fetch-user': '?1',
-        'upgrade-insecure-requests': '1',
-      },
+    const headers = {
+      'Host': parsedUrl.hostname,
+      'Connection': 'keep-alive',
+      'User-Agent': USER_AGENT,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Cache-Control': 'max-age=0',
+      'Cookie': cookieHeader,
+      'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"',
+      'sec-fetch-dest': 'document',
+      'sec-fetch-mode': 'navigate',
+      'sec-fetch-site': 'none',
+      'sec-fetch-user': '?1',
+      'upgrade-insecure-requests': '1',
     };
 
-    const req = https.request(options, (res) => {
+    if (proxyUrl) {
+      // Route request through HTTP/HTTPS proxy using CONNECT tunnel
+      const proxy = new URL(proxyUrl);
+      const isProxySecured = proxy.protocol === 'https:';
+
+      const connectOptions = {
+        host: proxy.hostname,
+        port: parseInt(proxy.port, 10) || (isProxySecured ? 443 : 80),
+        method: 'CONNECT',
+        path: `${parsedUrl.hostname}:443`,
+        headers: {
+          'Host': `${parsedUrl.hostname}:443`,
+        }
+      };
+
+      if (proxy.username && proxy.password) {
+        const auth = Buffer.from(`${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`).toString('base64');
+        connectOptions.headers['Proxy-Authorization'] = `Basic ${auth}`;
+      }
+
+      const proxyConnector = (isProxySecured ? https : http).request(connectOptions);
+
+      proxyConnector.on('connect', (res, socket, head) => {
+        if (res.statusCode !== 200) {
+          proxyConnector.destroy();
+          reject(new Error(`Proxy connection failed with status code ${res.statusCode}`));
+          return;
+        }
+
+        // Establish TLS tunnel over the established proxy socket
+        const tlsSocket = tls.connect({
+          socket: socket,
+          servername: parsedUrl.hostname,
+        }, () => {
+          // Send request over the TLS socket
+          const pathAndQuery = parsedUrl.pathname + parsedUrl.search;
+          tlsSocket.write(`GET ${pathAndQuery} HTTP/1.1\r\n`);
+          for (const [key, val] of Object.entries(headers)) {
+            tlsSocket.write(`${key}: ${val}\r\n`);
+          }
+          tlsSocket.write('\r\n');
+        });
+
+        let responseData = Buffer.alloc(0);
+        tlsSocket.on('data', (chunk) => {
+          responseData = Buffer.concat([responseData, chunk]);
+        });
+
+        tlsSocket.on('end', () => {
+          try {
+            const responseString = responseData.toString('binary');
+            const headerEndIndex = responseString.indexOf('\r\n\r\n');
+            if (headerEndIndex === -1) {
+              reject(new Error('Invalid HTTP response from proxy tunnel'));
+              return;
+            }
+
+            const headerString = responseString.substring(0, headerEndIndex);
+            const bodyBuffer = responseData.slice(headerEndIndex + 4);
+
+            const headerLines = headerString.split('\r\n');
+            const statusLine = headerLines[0];
+            const statusCode = parseInt(statusLine.split(' ')[1], 10);
+
+            const parsedHeaders = {};
+            for (let i = 1; i < headerLines.length; i++) {
+              const line = headerLines[i];
+              const colonIndex = line.indexOf(':');
+              if (colonIndex > 0) {
+                const key = line.substring(0, colonIndex).trim().toLowerCase();
+                const val = line.substring(colonIndex + 1).trim();
+                parsedHeaders[key] = val;
+              }
+            }
+
+            // Mock a response object to reuse downstream logic
+            const mockRes = {
+              statusCode,
+              headers: parsedHeaders,
+              pipe: (decompressor) => {
+                // Return a stream that decompresses the buffer
+                const Readable = require('stream').Readable;
+                const s = new Readable();
+                s.push(bodyBuffer);
+                s.push(null);
+                return s.pipe(decompressor);
+              },
+              on: (event, cb) => {
+                if (event === 'data') {
+                  cb(bodyBuffer);
+                } else if (event === 'end') {
+                  cb();
+                }
+              }
+            };
+
+            handleResponse(mockRes, resolve, reject);
+          } catch (err) {
+            reject(err);
+          }
+        });
+
+        tlsSocket.on('error', (err) => {
+          reject(err);
+        });
+      });
+
+      proxyConnector.on('error', (err) => {
+        reject(new Error(`Proxy setup error: ${err.message}`));
+      });
+
+      proxyConnector.end();
+    } else {
+      // Direct request (no proxy)
+      const options = {
+        hostname: parsedUrl.hostname,
+        port: 443,
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: 'GET',
+        headers,
+      };
+
+      const req = https.request(options, (res) => {
+        handleResponse(res, resolve, reject);
+      });
+
+      req.on('error', (err) => reject(err));
+      req.setTimeout(30000, () => {
+        req.destroy();
+        reject(new Error('Request timed out after 30s'));
+      });
+      req.end();
+    }
+
+    function handleResponse(res, resolve, reject) {
       // Follow redirects
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         let redirectUrl = res.headers.location;
@@ -488,14 +620,7 @@ function fetchPage(url, extraCookies = []) {
       stream.on('error', (err) => {
         reject(err);
       });
-    });
-
-    req.on('error', (err) => reject(err));
-    req.setTimeout(30000, () => {
-      req.destroy();
-      reject(new Error('Request timed out after 30s'));
-    });
-    req.end();
+    }
   });
 }
 
