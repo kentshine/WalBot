@@ -12,6 +12,7 @@ const https = require('https');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 
 // ── Configuration ──────────────────────────────────────────────
 const CONFIG = {
@@ -341,15 +342,64 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ── Global Cookie Jar for Browser Simulation ────────────────────
+let COOKIE_JAR = {};
+
+function parseSetCookies(setCookieHeaders) {
+  if (!setCookieHeaders) return [];
+  const headers = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
+  const list = [];
+  for (const header of headers) {
+    const parts = header.split(';')[0].split('=');
+    const name = parts[0].trim();
+    if (name) {
+      const value = parts.slice(1).join('=').trim();
+      list.push({ name, value });
+    }
+  }
+  return list;
+}
+
+function updateCookieJar(setCookieHeaders) {
+  if (!setCookieHeaders) return;
+  const cookies = parseSetCookies(setCookieHeaders);
+  for (const c of cookies) {
+    COOKIE_JAR[c.name] = c.value;
+  }
+}
+
+async function primeCookieJar() {
+  log('   Priming session cookies from Walmart homepage...', 'INFO');
+  try {
+    const { headers } = await fetchPage('https://www.walmart.com/', []);
+    if (headers && headers['set-cookie']) {
+      updateCookieJar(headers['set-cookie']);
+      log('   Session cookies primed successfully!', 'SUCCESS');
+    } else {
+      log('   ⚠️ No cookies returned on prime step', 'WARN');
+    }
+  } catch (err) {
+    log(`   ⚠️ Could not prime session cookies: ${err.message}`, 'WARN');
+  }
+}
+
 // ── HTTP-based Stock Check (no browser needed) ─────────────────
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-function fetchPage(url, cookies) {
+function fetchPage(url, extraCookies = []) {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
-    const cookieHeader = cookies
-      .map((c) => `${c.name}=${c.value}`)
+
+    // Merge extraCookies into the global cookie jar
+    if (extraCookies && extraCookies.length > 0) {
+      for (const c of extraCookies) {
+        COOKIE_JAR[c.name] = c.value;
+      }
+    }
+
+    const cookieHeader = Object.entries(COOKIE_JAR)
+      .map(([name, value]) => `${name}=${value}`)
       .join('; ');
 
     const options = {
@@ -358,12 +408,13 @@ function fetchPage(url, cookies) {
       path: parsedUrl.pathname + parsedUrl.search,
       method: 'GET',
       headers: {
+        'Host': parsedUrl.hostname,
+        'Connection': 'keep-alive',
         'User-Agent': USER_AGENT,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'identity',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'max-age=0',
         'Cookie': cookieHeader,
         'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
         'sec-ch-ua-mobile': '?0',
@@ -400,14 +451,42 @@ function fetchPage(url, cookies) {
         }
 
         log(`   Following redirect to: ${redirectUrl}`, 'INFO');
-        fetchPage(redirectUrl, cookies).then(resolve).catch(reject);
+        // Update cookies from the redirect response before following it
+        if (res.headers['set-cookie']) {
+          updateCookieJar(res.headers['set-cookie']);
+        }
+        fetchPage(redirectUrl, []).then(resolve).catch(reject);
         return;
       }
 
+      // Update cookie jar from response
+      if (res.headers['set-cookie']) {
+        updateCookieJar(res.headers['set-cookie']);
+      }
+
+      // Handle decompression
+      const contentEncoding = (res.headers['content-encoding'] || '').toLowerCase();
+      let stream = res;
+      try {
+        if (contentEncoding === 'gzip') {
+          stream = res.pipe(zlib.createGunzip());
+        } else if (contentEncoding === 'deflate') {
+          stream = res.pipe(zlib.createInflate());
+        } else if (contentEncoding === 'br') {
+          stream = res.pipe(zlib.createBrotliDecompress());
+        }
+      } catch (err) {
+        log(`   ⚠️ Failed to initialize decompression stream: ${err.message}`, 'WARN');
+        stream = res;
+      }
+
       let body = '';
-      res.on('data', (chunk) => (body += chunk));
-      res.on('end', () => {
+      stream.on('data', (chunk) => (body += chunk));
+      stream.on('end', () => {
         resolve({ statusCode: res.statusCode, body, headers: res.headers });
+      });
+      stream.on('error', (err) => {
+        reject(err);
       });
     });
 
@@ -759,6 +838,9 @@ async function runMonitor() {
   log(`Alerts sent: ${state.alertsSent}`);
   log(`Hourly reminders: enabled (every ${CONFIG.reminderIntervalMinutes} min while out of stock)`);
   console.log('');
+
+  // Prime the cookie jar with initial session cookies
+  await primeCookieJar();
 
   // First check
   await performCheck(state);
