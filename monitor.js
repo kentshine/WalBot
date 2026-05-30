@@ -420,6 +420,29 @@ async function checkStock() {
     browser = launched.browser;
     const context = launched.context;
 
+    // Block heavy assets (images, fonts, media) and tracking scripts to optimize speed and prevent network hangs
+    await context.route('**/*', (route) => {
+      const resourceType = route.request().resourceType();
+      if (['image', 'media', 'font'].includes(resourceType)) {
+        return route.abort();
+      }
+      const url = route.request().url().toLowerCase();
+      if (
+        url.includes('google-analytics') ||
+        url.includes('doubleclick') ||
+        url.includes('facebook') ||
+        url.includes('segment') ||
+        url.includes('hotjar') ||
+        url.includes('dynatrace') ||
+        url.includes('sentry') ||
+        url.includes('sc-static') ||
+        url.includes('adsystem')
+      ) {
+        return route.abort();
+      }
+      return route.continue();
+    });
+
     // Set store location cookies
     log('   Setting store location cookies...', 'INFO');
     await context.addCookies([
@@ -497,15 +520,19 @@ async function checkStock() {
     }
 
     // Grab page data
-    const pageContent = await page.content();
+    const nextDataText = await page.evaluate(() => {
+      const script = document.getElementById('__NEXT_DATA__');
+      return script ? script.textContent : null;
+    });
     const pageText = await page.evaluate(() => document.body?.innerText || '');
+    const pageContent = await page.content();
 
     // Close browser entirely (each check gets a fresh browser to avoid memory leaks)
     await browser.close();
     browser = null;
 
     // Run extraction strategies
-    let stockResult = tryNextDataExtraction(pageContent);
+    let stockResult = tryNextDataExtraction(nextDataText);
     if (stockResult === null) stockResult = tryPageTextExtraction(pageText);
     if (stockResult === null) stockResult = tryHtmlExtraction(pageContent);
 
@@ -527,19 +554,16 @@ async function checkStock() {
 }
 
 // ── Extraction Strategy 1: __NEXT_DATA__ ───────────────────────
-function tryNextDataExtraction(html) {
+function tryNextDataExtraction(nextDataText) {
   try {
-    const match = html.match(
-      /<script\s+id="__NEXT_DATA__"\s+type="application\/json">([\s\S]*?)<\/script>/
-    );
-    if (!match) {
+    if (!nextDataText) {
       log('   [Strategy 1] __NEXT_DATA__ not found', 'INFO');
       return null;
     }
 
     let data;
     try {
-      data = JSON.parse(match[1]);
+      data = JSON.parse(nextDataText);
     } catch {
       log('   [Strategy 1] Failed to parse __NEXT_DATA__', 'WARN');
       return null;
