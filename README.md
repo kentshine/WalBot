@@ -1,13 +1,13 @@
 # 🛒 Walmart Stock Alert Bot
 
-Monitors a specific Walmart product for in-store pickup availability and sends **Discord notifications** when stock changes. Uses **rebrowser-playwright** (undetected Chromium) for stealth anti-bot bypass.
+Monitors a specific Walmart product for in-store pickup availability and sends **Discord notifications** when stock changes. Uses a lightweight, high-performance HTTP engine with custom headers and cookie simulation for ultra-low memory usage (no heavy browser, zero OOM risk).
 
 ## Features
 
 - 🔍 Checks product availability every 5 minutes (configurable)
 - 📱 Sends Discord alerts when stock status changes
 - ⏰ Hourly "still monitoring" reminders when product stays out of stock
-- 🥷 Stealth Chromium via rebrowser-playwright (UC) to bypass anti-bot detection
+- 🥷 Zero-dependency, lightweight HTTP request system with custom headers/cookie simulation (no heavy browser, zero OOM risk)
 - 🏥 Built-in health check HTTP endpoint for cloud hosting
 - 🐳 Docker-ready for Railway, Render, Fly.io, etc.
 
@@ -19,18 +19,11 @@ Monitors a specific Walmart product for in-store pickup availability and sends *
    cd walmart-bot
    ```
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   ```
-
-3. **Configure `.env`**
-   ```bash
-   cp .env.example .env  # or create .env manually
-   ```
+2. **Configure `.env`**
+   Create a `.env` file manually:
    Set your `DISCORD_WEBHOOK_URL` in the `.env` file.
 
-4. **Run the bot**
+3. **Run the bot**
    ```bash
    npm start
    ```
@@ -111,7 +104,7 @@ store: {
 
 ## Tech Stack
 
-- **Node.js** — Runtime
-- **rebrowser-playwright** — Stealth Chromium automation (undetected-chromedriver for JS)
+- **Node.js** — Runtime (zero third-party dependencies required!)
+- **HTTP Engine** — Standalone HTTP client simulating realistic browser requests, with multiple built-in JSON/regex stock extraction strategies.
 - **Discord Webhooks** — Notifications
-- **Docker** — Containerized deployment
+- **Docker** — Containerized deployment (ultra-lightweight slim image)
