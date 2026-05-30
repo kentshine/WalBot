@@ -4,11 +4,10 @@
 // Monitors a specific Walmart product for in-store availability
 // at the Horseheads Supercenter and sends Discord alerts.
 //
-// Uses official Playwright Chromium in headless
-// mode with stealth arguments for cloud deployment
+// Uses lightweight HTTP requests (no browser needed)
+// for reliable cloud deployment on Railway/Render
 // ============================================
 
-const { chromium } = require('playwright');
 const https = require('https');
 const http = require('http');
 const fs = require('fs');
@@ -342,79 +341,75 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ── Stealth Browser Launch ─────────────────────────────────────
-const STEALTH_ARGS = [
-  '--no-sandbox',
-  '--disable-setuid-sandbox',
-  '--disable-dev-shm-usage',
-  '--disable-gpu',
-];
-
+// ── HTTP-based Stock Check (no browser needed) ─────────────────
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-async function launchStealthBrowser() {
-  log('   Launching stealth Chromium (headless)...', 'INFO');
+function fetchPage(url, cookies) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(url);
+    const cookieHeader = cookies
+      .map((c) => `${c.name}=${c.value}`)
+      .join('; ');
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: STEALTH_ARGS,
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: 443,
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: 'GET',
+      headers: {
+        'User-Agent': USER_AGENT,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'identity',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Cookie': cookieHeader,
+        'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'document',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-site': 'none',
+        'sec-fetch-user': '?1',
+        'upgrade-insecure-requests': '1',
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      // Follow redirects
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        log(`   Following redirect to: ${res.headers.location}`, 'INFO');
+        fetchPage(res.headers.location, cookies).then(resolve).catch(reject);
+        return;
+      }
+
+      let body = '';
+      res.on('data', (chunk) => (body += chunk));
+      res.on('end', () => {
+        resolve({ statusCode: res.statusCode, body, headers: res.headers });
+      });
+    });
+
+    req.on('error', (err) => reject(err));
+    req.setTimeout(30000, () => {
+      req.destroy();
+      reject(new Error('Request timed out after 30s'));
+    });
+    req.end();
   });
-
-  const context = await browser.newContext({
-    userAgent: USER_AGENT,
-    viewport: { width: 1280, height: 900 },
-    locale: 'en-US',
-    timezoneId: 'America/New_York',
-    geolocation: { latitude: 42.1678, longitude: -76.8261 }, // Horseheads, NY
-    permissions: ['geolocation'],
-    // Extra headers to look more human
-    extraHTTPHeaders: {
-      'Accept-Language': 'en-US,en;q=0.9',
-      'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-      'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': '"Windows"',
-    },
-  });
-
-  log('   Stealth Chromium ready!', 'SUCCESS');
-  return { browser, context };
 }
 
-// ── Stock Check ────────────────────────────────────────────────
 async function checkStock() {
   log(`Checking stock for: ${CONFIG.product.name}`);
   log(`Store: ${CONFIG.store.name} (ID: ${CONFIG.store.id})`);
 
-  let browser = null;
-
   try {
-    // Launch stealth browser
-    const launched = await launchStealthBrowser();
-    browser = launched.browser;
-    const context = launched.context;
-
-    // Set store location cookies
-    log('   Setting store location cookies...', 'INFO');
-    await context.addCookies([
-      {
-        name: 'assortmentStoreId',
-        value: CONFIG.store.id,
-        domain: '.walmart.com',
-        path: '/',
-      },
-      {
-        name: 'com.wm.reflector',
-        value: `reflectorid:0:${CONFIG.store.id}`,
-        domain: '.walmart.com',
-        path: '/',
-      },
-      {
-        name: 'hasLocData',
-        value: '1',
-        domain: '.walmart.com',
-        path: '/',
-      },
+    // Build store location cookies
+    const cookies = [
+      { name: 'assortmentStoreId', value: CONFIG.store.id },
+      { name: 'com.wm.reflector', value: `reflectorid:0:${CONFIG.store.id}` },
+      { name: 'hasLocData', value: '1' },
       {
         name: 'locGuestData',
         value: encodeURIComponent(
@@ -428,78 +423,46 @@ async function checkStock() {
             isExplicitIntent: true,
           })
         ),
-        domain: '.walmart.com',
-        path: '/',
       },
-    ]);
+    ];
 
-    // Create a new page
-    const page = await context.newPage();
+    log('   Fetching product page via HTTP...', 'INFO');
+    const { statusCode, body } = await fetchPage(CONFIG.product.url, cookies);
+    log(`   HTTP ${statusCode} — received ${(body.length / 1024).toFixed(1)} KB`, 'INFO');
 
-    // Navigate to the product page
-    log('   Navigating to product page...', 'INFO');
-    await page.goto(CONFIG.product.url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 60000,
-    });
-
-    // Wait for dynamic content
-    await randomDelay(5000, 8000);
-
-    // Check for bot detection
-    const title = await page.title();
-    if (title.toLowerCase().includes('robot') || title.toLowerCase().includes('human')) {
-      log('   ⚠️ Bot challenge detected! Running in headless mode — cannot solve manually.', 'WARN');
-      log('   Will retry next cycle. rebrowser-playwright stealth should reduce these.', 'INFO');
-
-      // Wait a short while in case it auto-resolves (some challenges do)
-      try {
-        await page.waitForFunction(
-          () => {
-            const t = document.title.toLowerCase();
-            return !t.includes('robot') && !t.includes('human');
-          },
-          { timeout: 15000 }
-        );
-        log('   ✅ Bot challenge auto-resolved!', 'SUCCESS');
-        await randomDelay(3000, 5000);
-      } catch {
-        log('   ❌ Bot challenge persists. Skipping this cycle.', 'WARN');
-        await browser.close();
+    if (statusCode !== 200) {
+      log(`   ⚠️ Unexpected status code: ${statusCode}`, 'WARN');
+      if (statusCode === 403 || statusCode === 429) {
+        log('   Bot detection or rate limit hit. Will retry next cycle.', 'WARN');
         return null;
       }
     }
 
-    // Grab page data
-    const nextDataText = await page.evaluate(() => {
-      const script = document.getElementById('__NEXT_DATA__');
-      return script ? script.textContent : null;
-    });
-    const pageText = await page.evaluate(() => document.body?.innerText || '');
-    const pageContent = await page.content();
+    // Check for bot challenge page
+    if (body.includes('are you a robot') || body.includes('verify you are human') || body.includes('px-captcha')) {
+      log('   ⚠️ Bot challenge page detected. Will retry next cycle.', 'WARN');
+      return null;
+    }
 
-    // Close browser entirely (each check gets a fresh browser to avoid memory leaks)
-    await browser.close();
-    browser = null;
+    // Extract __NEXT_DATA__ JSON from the HTML
+    const nextDataMatch = body.match(/<script\s+id="__NEXT_DATA__"\s+type="application\/json">([^<]+)<\/script>/);
+    const nextDataText = nextDataMatch ? nextDataMatch[1] : null;
 
     // Run extraction strategies
     let stockResult = tryNextDataExtraction(nextDataText);
-    if (stockResult === null) stockResult = tryPageTextExtraction(pageText);
-    if (stockResult === null) stockResult = tryHtmlExtraction(pageContent);
+    if (stockResult === null) stockResult = tryPageTextExtraction(body);
+    if (stockResult === null) stockResult = tryHtmlExtraction(body);
 
     if (stockResult === null) {
       log('⚠️  Could not determine stock status', 'WARN');
       // Show a snippet for debugging
-      const snippet = pageText.substring(0, 500).replace(/\s+/g, ' ').trim();
+      const snippet = body.substring(0, 500).replace(/\s+/g, ' ').trim();
       log(`   Page snippet: ${snippet.substring(0, 200)}...`, 'INFO');
     }
 
     return stockResult;
   } catch (err) {
     log(`❌ Error checking stock: ${err.message}`, 'ERROR');
-    if (browser) {
-      try { await browser.close(); } catch (_) {}
-    }
     return null;
   }
 }
@@ -745,12 +708,12 @@ async function runMonitor() {
   console.log(`║  Address:  ${CONFIG.store.address.padEnd(51)} ║`);
   console.log(`║  Interval: Every ${(CONFIG.checkIntervalMinutes + ' minutes').padEnd(44)} ║`);
   console.log(`║  Reminder: Every ${(CONFIG.reminderIntervalMinutes + ' min (if out of stock)').padEnd(44)} ║`);
-  console.log(`║  Mode:     Stealth Chromium (rebrowser-playwright)${' '.repeat(14)}║`);
+  console.log(`║  Mode:     Lightweight HTTP (no browser needed)${' '.repeat(17)}║`);
   console.log(`║  Health:   http://localhost:${String(CONFIG.port).padEnd(37)}║`);
   console.log('╚══════════════════════════════════════════════════════════════════╝');
   console.log('');
-  console.log('  ℹ️  Running in headless mode — optimized for cloud deployment.');
-  console.log('  ℹ️  Using rebrowser-playwright stealth to bypass anti-bot detection.');
+  console.log('  ℹ️  Using direct HTTP requests — ultra-lightweight, no Chromium needed.');
+  console.log('  ℹ️  Optimized for cloud deployment on Railway/Render.');
   console.log('');
 
   if (

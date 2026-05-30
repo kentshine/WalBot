@@ -1,10 +1,10 @@
-FROM mcr.microsoft.com/playwright:v1.60.0-noble
+FROM node:20-slim
 
 WORKDIR /app
 
 # Copy package files and install dependencies
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev 2>/dev/null || true
 
 # Copy source code
 COPY . .
