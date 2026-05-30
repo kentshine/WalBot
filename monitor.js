@@ -379,8 +379,28 @@ function fetchPage(url, cookies) {
     const req = https.request(options, (res) => {
       // Follow redirects
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        log(`   Following redirect to: ${res.headers.location}`, 'INFO');
-        fetchPage(res.headers.location, cookies).then(resolve).catch(reject);
+        let redirectUrl = res.headers.location;
+        // Resolve relative redirects
+        if (!redirectUrl.startsWith('http://') && !redirectUrl.startsWith('https://')) {
+          try {
+            const base = new URL(url);
+            redirectUrl = new URL(redirectUrl, base.origin).toString();
+          } catch (err) {
+            log(`   ⚠️ Failed to resolve relative redirect: ${err.message}`, 'WARN');
+            resolve({ statusCode: res.statusCode, body: 'invalid redirect url', headers: res.headers });
+            return;
+          }
+        }
+
+        // Intercept block/captcha pages to avoid infinite loops or unnecessary fetching
+        if (redirectUrl.includes('/blocked')) {
+          log('   ⚠️ Redirected to a blocked/challenge page', 'WARN');
+          resolve({ statusCode: 403, body: 'are you a robot (redirected to blocked page)', headers: res.headers });
+          return;
+        }
+
+        log(`   Following redirect to: ${redirectUrl}`, 'INFO');
+        fetchPage(redirectUrl, cookies).then(resolve).catch(reject);
         return;
       }
 
